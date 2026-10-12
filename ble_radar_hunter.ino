@@ -21,11 +21,11 @@ using namespace esp_panel::drivers;
 #define PIN_BL   41
 #define PIN_BATT 8
 
-#define SCP_X 12
-#define SCP_Y 40
-#define SCP_S 300
-#define SCP_C 150
-#define SCP_R 146
+#define SCP_X 20
+#define SCP_Y 56
+#define SCP_S 280
+#define SCP_C 140
+#define SCP_R 130
 
 #define RSSI_1M (-59)
 #define PATH_N  2.0f          // free-space. Raise toward 2.7 if indoor reads run long.
@@ -189,7 +189,7 @@ static const uint8_t FONT96[64][5] = {
 {0x3E,0x41,0x41,0x41,0x22},
 {0x7F,0x41,0x41,0x22,0x1C},
 {0x7F,0x49,0x49,0x49,0x41},
-{0x7F,0x48,0x48,0x48,0x40},
+{0x7F,0x09,0x09,0x09,0x01},
 {0x3E,0x41,0x49,0x49,0x7A},
 {0x7F,0x08,0x08,0x08,0x7F},
 {0x00,0x41,0x7F,0x41,0x00},
@@ -199,13 +199,13 @@ static const uint8_t FONT96[64][5] = {
 {0x7F,0x02,0x0C,0x02,0x7F},
 {0x7F,0x04,0x08,0x10,0x7F},
 {0x3E,0x41,0x41,0x41,0x3E},
-{0x7F,0x48,0x48,0x48,0x30},
+{0x7F,0x09,0x09,0x09,0x06},
 {0x3E,0x41,0x51,0x21,0x5E},
 {0x7F,0x09,0x19,0x29,0x46},
 {0x46,0x49,0x49,0x49,0x31},
 {0x01,0x01,0x7F,0x01,0x01},
 {0x7F,0x40,0x40,0x40,0x7F},
-{0x7F,0x20,0x10,0x20,0x7F},
+{0x0F,0x30,0x40,0x30,0x0F},
 {0x7F,0x20,0x18,0x20,0x7F},
 {0x63,0x14,0x08,0x14,0x63},
 {0x07,0x08,0x70,0x08,0x07},
@@ -236,7 +236,7 @@ void lcdRect(int x, int y, int w, int h, uint16_t color) {
   int done = 0;
   while (done < h) {
     int chunk = h - done;
-    if (chunk > 32) chunk = 32;
+    if (chunk > 16) chunk = 16;
     for (int r = 1; r < chunk; r++) memcpy(&rectBuf[r * w * 2], rectBuf, w * 2);
     lcd->drawBitmap(x, y + done, w, chunk, rectBuf);
     done += chunk;
@@ -369,12 +369,12 @@ static void bearingXY(int deg, int radius, int *x, int *y) {
 }
 
 void lcdFill(uint16_t color) {
-  static uint8_t chunk[320 * 32 * 2];
+  static uint8_t chunk[320 * 16 * 2];
   for (int i = 0; i < 320; i++) putPx(&chunk[i * 2], color);
-  for (int r = 1; r < 32; r++) memcpy(&chunk[r * 320 * 2], chunk, 320 * 2);
-  for (int y = 0; y < 480; y += 32) {
+  for (int r = 1; r < 16; r++) memcpy(&chunk[r * 320 * 2], chunk, 320 * 2);
+  for (int y = 0; y < 480; y += 16) {
     int c = 480 - y;
-    if (c > 32) c = 32;
+    if (c > 16) c = 16;
     lcd->drawBitmap(0, y, 320, c, chunk);
   }
 }
@@ -488,8 +488,7 @@ static void copyClean(char *dst, int n, const char *src) {
   while (j > 0 && dst[j - 1] == ' ') dst[--j] = '\0';
 }
 
-
-// ---- Credits (final view) - edit these ----
+// ---- Credits (final view)  ----
 #define CREDIT_NAME   "Mikael Henry"
 #define CREDIT_WEB    "mutillix.com"
 #define CREDIT_GITHUB "github.com/mutillix"
@@ -589,20 +588,20 @@ static uint8_t faceBuf[76 * 128 * 2];
 #define EYE_Y0 48
 #define EYE_Y1 66
 
-
-
-
-
 static bool sdUp = false;
 static File logFile;
 static uint32_t lastFlush = 0;
 static int logLines = 0;
 
 void sdBegin() {
-  SD_MMC.setPins(5, 4, 6); // CLK CMD D0, 1-bit. D1-D3 stay free.
+  // Hosyond ES3C28P/ES3N28P onboard TF slot (SDMMC, not SPI).
+  // CLK=38 CMD=40 D0=39. 1-bit only — D1 (41) collides with PIN_BL.
+  SD_MMC.setPins(38, 40, 39);
   sdUp = SD_MMC.begin("/sdcard", true);
   sdFail = !sdUp;
   if (!sdUp) Serial.println("sd dark");
+  else       Serial.println("sd up");
+  rgbOff();  // GPIO40 = SD CMD, re-kill LED after SD touches it
 }
 
 static double gpsLat = 0, gpsLon = 0;
@@ -773,7 +772,6 @@ void hunterRx(void *buf, wifi_promiscuous_pkt_type_t type) {
   huntW.store(nx, std::memory_order_release);
 }
 
-
 // ---- WiFi band: async scan ----
 static uint32_t wifiScanAt = 0;
 static bool wifiScanning = false;
@@ -877,11 +875,121 @@ void hunterStop() {
   Serial.println("hunter off");
 }
 
-
 // ---- Hunter game ----
 static uint32_t gameDay(uint32_t now) {
   return (gameBaseUptime + now / 1000) / 86400;
 }
+
+static int gpsUtcHour = -1;
+
+// ==================== HUNTER 2.0 (Tier 1) ====================
+// Badges: bitmask in NVS "hunter" namespace, key "badges"
+//  0: First BLE catch      1: First ESP-NOW catch    2: First WiFi catch
+//  3: 25 uniques           4: 100 uniques            5: 250 uniques
+//  6: 500 uniques           7: 1000 uniques
+//  8: First AirTag          9: First Tile            10: First SmartTag
+//  11: Night Owl (22:00-06:00 UTC)  12: Marathon (1hr session)
+//  13: Globetrotter (5 GPS grid cells)
+static uint32_t badgeBits = 0;
+static const char *badgeNames[14] = {
+  "BLE PIONEER", "ESP PIONEER", "WIFI PIONEER",
+  "COLLECTOR 25", "COLLECTOR 100", "COLLECTOR 250",
+  "COLLECTOR 500", "COLLECTOR 1000",
+  "TAG SPOTTER", "TILE SPOTTER", "SMARTTAG SPOTTER",
+  "NIGHT OWL", "MARATHON", "GLOBETROTTER"
+};
+static uint32_t badgeQueue = 0;  // pending banner display
+
+static void badgeUnlock(int b, uint32_t now) {
+  if (b < 0 || b > 13) return;
+  if (badgeBits & (1UL << b)) return;
+  badgeBits |= (1UL << b);
+  gamePrefs.putUInt("badges", badgeBits);
+  badgeQueue |= (1UL << b);
+  Serial.printf("BADGE: %s\n", badgeNames[b]);
+}
+
+// OUI rarity: first 3 MAC bytes -> tier (0=common x1, 1=uncommon x2, 2=rare x3, 3=legendary x5)
+// Legendary = OUI not in table (never seen before)
+struct RarityEntry { uint8_t b[3]; uint8_t tier; };
+static const RarityEntry ouiTable[] = {
+  {{0x24,0x0A,0xC4},0}, {{0x30,0xAE,0xA4},0}, {{0x7C,0xDF,0xA1},0},  // Espressif
+  {{0xDC,0xA6,0x32},0}, {{0xE8,0xDB,0x84},0},                        // Espressif
+  {{0x4C,0x32,0x75},0}, {{0x88,0x1B,0x99},0}, {{0xF0,0x18,0x98},0},  // Apple
+  {{0x8C,0x7A,0xAA},0}, {{0x40,0xCB,0xC0},0},                        // Apple
+  {{0x8C,0xF5,0xA3},0}, {{0x9C,0x8E,0xCD},0},                        // Samsung
+  {{0x00,0x17,0xAB},1}, {{0x00,0x1A,0x11},1},                        // Google
+  {{0x18,0xB4,0x30},1}, {{0x54,0x60,0x09},1},                        // Amazon
+  {{0x50,0xDC,0xE7},1}, {{0x74,0xC6,0x3B},1},                        // Tile
+  {{0xD8,0xA0,0x1D},1}, {{0xF4,0xF5,0xD8},1},                        // Intel
+  {{0xB8,0x27,0xEB},1}, {{0xDC,0xA6,0x32},1},                        // Raspberry Pi
+  {{0x00,0x0C,0x29},2}, {{0x00,0x50,0x56},2},                        // VMware
+  {{0x00,0x1B,0x21},2}, {{0x00,0x21,0x6A},2},                        // Intel corp
+  {{0x3C,0x22,0xFB},2}, {{0xA4,0xCF,0x12},2},                        // Espressif rare
+  {{0x08,0x3A,0xF2},2}, {{0x10,0x52,0x1C},2},                        // Nordic Semi
+  {{0x00,0xE0,0x4C},2}, {{0x00,0x80,0x41},2},                        // Realtek
+  {{0xC4,0x4E,0xAC},2}, {{0xEC,0xFA,0xBC},2},                        // Espressif
+};
+#define OUI_N (sizeof(ouiTable)/sizeof(ouiTable[0]))
+static const uint8_t rarityMult[4] = {1, 2, 3, 5};
+static const char *rarityName[4] = {"COMMON", "UNCOMMON", "RARE", "LEGENDARY"};
+
+static int ouiRarity(const char *mac) {
+  unsigned b0, b1, b2;
+  if (sscanf(mac, "%2x:%2x:%2x", &b0, &b1, &b2) != 3) return 3;
+  for (int i = 0; i < OUI_N; i++) {
+    if (ouiTable[i].b[0]==b0 && ouiTable[i].b[1]==b1 && ouiTable[i].b[2]==b2)
+      return ouiTable[i].tier;
+  }
+  return 3;  // not in table = legendary
+}
+
+// Combo: catches within 60s chain
+static uint32_t comboLast = 0;
+static int comboN = 0;
+static int comboMult(uint32_t now) {
+  if (now - comboLast < 60000) comboN++;
+  else comboN = 1;
+  comboLast = now;
+  if (comboN >= 8) return 5;
+  if (comboN >= 5) return 4;
+  if (comboN >= 3) return 3;
+  if (comboN >= 2) return 2;
+  return 1;
+}
+
+// Category bonuses
+static bool isDefaultSsid(const char *name) {
+  const char *defaults[] = {"linksys","netgear","default","dlink","tplink",
+    "xfinity","attwifi","verizon","spectrum","coxwifi",NULL};
+  char lower[34];
+  for (int i = 0; name[i] && i < 33; i++) lower[i] = tolower(name[i]);
+  lower[33] = 0;
+  for (int i = 0; defaults[i]; i++)
+    if (strstr(lower, defaults[i])) return true;
+  return false;
+}
+
+// Grid cells for Globetrotter (100m approx = 0.0009 deg lat)
+#define GRID_CELLS 32
+static int32_t gridCells[GRID_CELLS];
+static int gridN = 0;
+static int gridCellId(float lat, float lon) {
+  int32_t la = (int32_t)(lat * 1111);   // ~90m
+  int32_t lo = (int32_t)(lon * 1111);
+  return (la * 73856093) ^ (lo * 19349663);
+}
+static bool gridAdd(float lat, float lon) {
+  int id = gridCellId(lat, lon);
+  for (int i = 0; i < gridN; i++) if (gridCells[i] == id) return false;
+  if (gridN < GRID_CELLS) gridCells[gridN++] = id;
+  return true;
+}
+
+// Session tracking for Marathon
+static uint32_t sessionStart = 0;
+static bool marathonDone = false;
+// ==================== /HUNTER 2.0 ====================
 
 void gameInit() {
   gamePrefs.begin("hunter", false);
@@ -890,6 +998,8 @@ void gameInit() {
   gameStreak = gamePrefs.getInt("streak", 0);
   gameLastDay = gamePrefs.getUInt("lastday", 0);
   gameBaseUptime = gamePrefs.getUInt("uptime", 0);
+  badgeBits = gamePrefs.getUInt("badges", 0);
+  sessionStart = millis();
   gameCaughtN = gamePrefs.getInt("n", 0);
   if (gameCaughtN > GAME_MAX_CATCHES) gameCaughtN = GAME_MAX_CATCHES;
   for (int i = 0; i < gameCaughtN; i++) {
@@ -908,13 +1018,59 @@ static bool gameIsCaught(const char *mac) {
   return false;
 }
 
+
+
+
+
 void gameCatch(int i, uint32_t now) {
   Tgt *t = &tgts[i];
   if (gameIsCaught(t->mac)) return;  // first catches only
+
+  // Base points
   int pts = (t->peakRssi + 100) * 10;
   if (pts < 0) pts = 0;
+
+  // Rarity multiplier
+  int rar = ouiRarity(t->mac);
+  pts *= rarityMult[rar];
+
+  // Combo multiplier
+  int cmb = comboMult(now);
+  pts *= cmb;
+
+  // Category bonuses (flat)
+  int bonus = 0;
+  if (t->type == TYPE_WIFI && isDefaultSsid(t->name)) bonus += 50;
+  int bestRssi = gamePrefs.getInt("bestrssi", -100);
+  if (t->peakRssi > bestRssi) {
+    bonus += 30;
+    gamePrefs.putInt("bestrssi", t->peakRssi);
+  }
+  // multi-band: check if this MAC was seen on another band
+  // (tracked via caught MACs with type suffix - simplified: skip for now)
+  pts += bonus;
+
   gameScore += pts;
   gameCatches++;
+
+  // ---- Badges ----
+  if (t->type == TYPE_BLE) badgeUnlock(0, now);
+  if (t->type == TYPE_ESP) badgeUnlock(1, now);
+  if (t->type == TYPE_WIFI) badgeUnlock(2, now);
+  if (gameCatches >= 25) badgeUnlock(3, now);
+  if (gameCatches >= 100) badgeUnlock(4, now);
+  if (gameCatches >= 250) badgeUnlock(5, now);
+  if (gameCatches >= 500) badgeUnlock(6, now);
+  if (gameCatches >= 1000) badgeUnlock(7, now);
+  if (t->tracker == 1) badgeUnlock(8, now);
+  if (t->tracker == 2) badgeUnlock(9, now);
+  if (t->tracker == 3) badgeUnlock(10, now);
+  if (gpsUtcHour >= 22 || gpsUtcHour < 6) badgeUnlock(11, now);
+  if (!marathonDone && sessionStart > 0 && now - sessionStart >= 3600000) {
+    marathonDone = true;
+    badgeUnlock(12, now);
+  }
+  if (gpsFix && gridAdd(gpsLat, gpsLon) && gridN >= 5) badgeUnlock(13, now);
   if (gameCaughtN < GAME_MAX_CATCHES) {
     gameCaughtHashes[gameCaughtN] = macHash(t->mac);
     char key[8];
@@ -932,7 +1088,7 @@ void gameCatch(int i, uint32_t now) {
     gamePrefs.putInt("streak", gameStreak);
     gamePrefs.putUInt("lastday", gameLastDay);
   }
-  Serial.printf("HUNT: +%d %s (score %u streak %d)\n", pts, t->name, gameScore, gameStreak);
+  Serial.printf("HUNT: +%d %s [%s x%d cmb x%d] (score %u)\n", pts, t->name, rarityName[rar], rarityMult[rar], cmb, gameScore);
 }
 
 void gameTick(uint32_t now) {
@@ -978,6 +1134,35 @@ void drawGameView() {
   lcdTextC(140, buf, 2, A_MID, A_BLACK);
   snprintf(buf, sizeof(buf), "STREAK %d DAY%s", gameStreak, gameStreak == 1 ? "" : "S");
   lcdTextC(170, buf, 2, A_MID, A_BLACK);
+  // combo display
+  if (comboN >= 2) {
+    snprintf(buf, sizeof(buf), "COMBO x%d", comboN >= 8 ? 5 : comboN >= 5 ? 4 : comboN >= 3 ? 3 : 2);
+    lcdTextC(195, buf, 2, 0xFFE0, A_BLACK);
+  }
+  // badge unlock banner (shows for 3s)
+  static uint32_t badgeBannerUntil = 0;
+  static int badgeBannerIdx = -1;
+  if (badgeQueue) {
+    for (int b = 0; b < 14; b++) if (badgeQueue & (1UL << b)) {
+      badgeBannerIdx = b;
+      badgeQueue &= ~(1UL << b);
+      badgeBannerUntil = now + 3000;
+      break;
+    }
+  }
+  if (badgeBannerIdx >= 0 && now < badgeBannerUntil) {
+    lcdRect(20, 230, 280, 40, 0x07E0);
+    lcdRect(22, 232, 276, 36, A_BLACK);
+    snprintf(buf, sizeof(buf), "BADGE: %s", badgeNames[badgeBannerIdx]);
+    lcdTextC(240, buf, 1, 0x07E0, A_BLACK);
+  } else if (now >= badgeBannerUntil) {
+    badgeBannerIdx = -1;
+  }
+  // badge count
+  int bc = 0;
+  for (int b = 0; b < 14; b++) if (badgeBits & (1UL << b)) bc++;
+  snprintf(buf, sizeof(buf), "BADGES %d/14", bc);
+  lcdTextC(420, buf, 1, A_DIM, A_BLACK);
   // recent catches: strongest fresh targets
   lcdTextC(210, "IN RANGE", 1, A_DIM, A_BLACK);
   static Tgt tmp[MAXTGT];
@@ -1007,7 +1192,6 @@ void drawGameView() {
   }
   if (n == 0) lcdTextC(250, "NOTHING CLOSE", 1, A_DIM, A_BLACK);
 }
-
 
 // ---- Waterfall: time (down) x device (across), brightness = RSSI ----
 #define WF_COLS 40
@@ -1061,7 +1245,6 @@ void drawWaterfall() {
   }
   lcdText(8, 348, "WATERFALL 2s/row", 1, A_DIM, A_BLACK);
 }
-
 // ---- Strip chart: RSSI over time for 6 strongest ----
 #define SC_N 6
 #define SC_SAMPLES 160
@@ -1152,9 +1335,9 @@ void drawStripChart() {
     }
   }
   // push framebuffer in bands
-  for (int y = 0; y < 310; y += 34) {
+  for (int y = 0; y < 310; y += 16) {
     int h = 310 - y;
-    if (h > 34) h = 34;
+    if (h > 16) h = 16;
     lcd->drawBitmap(0, 36 + y, 320, h, &scFb[(y * 320) * 2]);
   }
   // labels (drawn on screen, not in fb)
@@ -1251,7 +1434,7 @@ void pickDataBlocks(uint32_t now) {
 
 void renderScope(uint32_t now) {
   fbClear();
-  const int rings[3] = {24, 84, 144};
+  const int rings[3] = {22, 72, 122};
   for (int k = 0; k < 3; k++) fbCircle(SCP_C, SCP_C, rings[k], A_DIM);
   fbLine(SCP_C - SCP_R, SCP_C, SCP_C + SCP_R, SCP_C, A_FAINT);
   fbLine(SCP_C, SCP_C - SCP_R, SCP_C, SCP_C + SCP_R, A_FAINT);
@@ -1335,10 +1518,10 @@ void renderScope(uint32_t now) {
     fbText(lx, ly, k == 0 ? "1m" : k == 1 ? "10m" : "100m", A_DIM);
   }
   fbText(SCP_C - 3, 4, "N", A_DIM);
-  fbText(SCP_C - 3, SCP_S - 12, "S", A_DIM);
+  fbText(SCP_C - 3, SCP_S - 8, "S", A_DIM);
   fbText(4, SCP_C - 4, "W", A_DIM);
-  fbText(SCP_S - 12, SCP_C - 4, "E", A_DIM);
-#define SCP_BANDH 60
+  fbText(SCP_S - 7, SCP_C - 4, "E", A_DIM);
+#define SCP_BANDH 20
   for (int b = 0; b < SCP_S / SCP_BANDH; b++)
     lcd->drawBitmap(SCP_X, SCP_Y + b * SCP_BANDH, SCP_S, SCP_BANDH,
                     &scpFb[(b * SCP_BANDH * SCP_S) * 2]);
@@ -1351,7 +1534,6 @@ void battSample() {
   else battV = battV * 0.7f + v * 0.3f;
   battPresent = battV > 2.80f && battV < 4.40f;
 }
-
 
 // ---- Watchlist alerts ----
 #define ALERT_MS 8000  // how long banner shows
@@ -1407,7 +1589,7 @@ void drawAlertBanner() {
 
 void drawTopBar() {
   char buf[64];
-  uint32_t s = millis() / 1000;
+  uint32_t s = millis() / 3000;
   const char *title = viewMode == 0 ? "RAIN" :
                       viewMode == 2 ? "LIST" : viewMode == 3 ? "HUNTER" :
                       viewMode == 4 ? "WATERFALL" :
@@ -1441,14 +1623,14 @@ void drawTopBar() {
 
 void drawStrip() {
   for (int row = 0; row < 4; row++)
-    lcdRect(0, 348 + row * 32, 236, 30, A_BLACK);
+    lcdRect(0, 340 + row * 32, 236, 30, A_BLACK);
   int shown = 0;
   uint32_t now = millis();
   for (int k = 0; k < mruN && shown < 4; k++) {
     Tgt *t = &tgts[mru[k]];
     if (t->type != wantType()) continue;
     if (now - t->last > STALE_MS) continue;
-    int y = 348 + shown * 32;
+    int y = 340 + shown * 32;
     lcdRect(8, y + 10, 8, 8, A_MID);
     char nm[22];
     bool fresh = (now - t->born) < 60000;
@@ -1619,6 +1801,10 @@ static void gpsParseLine(char *line) {
     char *spd = NULL;
     while (tok) {
       field++;
+      if (field == 2 && strlen(tok) >= 2) {
+        char hh[3] = {tok[0], tok[1], 0};
+        gpsUtcHour = atoi(hh);
+      }
       if (field == 8) spd = tok;
       tok = strtok(NULL, ",");
     }
@@ -1730,9 +1916,9 @@ void drawFindView() {
   snprintf(dist, sizeof(dist), "~%.1f meters", bleDistM(t->rssi));
   lcdText(16, y, dist, 2, A_BRIGHT, A_BLACK);
   y += 40;
-  lcdText(16, y, "Rotate slowly.", 1, A_DIM, A_BLACK);
-  lcdText(16, y + 18, "Signal peaks when", 1, A_DIM, A_BLACK);
-  lcdText(16, y + 36, "facing the target.", 1, A_DIM, A_BLACK);
+  lcdText(16, y, "Rotate slowly.", 2, A_DIM, A_BLACK);
+  lcdText(16, y + 18, "Signal peaks when", 2, A_DIM, A_BLACK);
+  lcdText(16, y + 36, "facing the target.", 2, A_DIM, A_BLACK);
 }
 
 void drawTrackerView() {
@@ -1874,8 +2060,8 @@ void bootPoll() {
 
 // ---- Position broadcast: UDP to base station ----
 // Set your WiFi credentials to enable. Leave blank to disable.
-#define TRACK_SSID ""
-#define TRACK_PASS ""
+#define TRACK_SSID " "
+#define TRACK_PASS " "
 #define TRACK_PORT 4210
 static WiFiUDP trackUdp;
 static bool trackUp = false;
@@ -1994,26 +2180,33 @@ static void drawRainView(uint32_t now) {
 static void drawCreditsView() {
   lcdRect(0, 36, 320, 444, A_BLACK);
   int y = 120;
-  lcdTextC(y, CREDIT_NAME, 2, 0x07E0, 0x0000);       y += 36;
-  lcdTextC(y, CREDIT_WEB, 1, 0xFFE0, 0x0000);        y += 24;
-  lcdTextC(y, CREDIT_GITHUB, 1, 0x8410, 0x0000);     y += 40;
+  lcdTextC(y, CREDIT_NAME, 3, 0x07E0, 0x0000);       y += 36;
+  lcdTextC(y, CREDIT_WEB, 2, 0xFFE0, 0x0000);        y += 24;
+  lcdTextC(y, CREDIT_GITHUB, 2, 0x8410, 0x0000);     y += 40;
   // blank line then slogan
-  lcdTextC(y, CREDIT_SLOGAN, 1, 0x07FF, 0x0000);     y += 30;
+  lcdTextC(y, CREDIT_SLOGAN, 2, 0x07FF, 0x0000);     y += 30;
   lcdTextC(400, "TAP BOOT = VIEWS", 1, 0x8410, 0x0000);
 }
 
 
+
+// Turn off onboard RGB LED (GPIO40 WS2812) via ESP32 RMT driver
+void rgbOff() {
+  neopixelWrite(40, 0, 0, 0);
+}
+
 void setup() {
   Serial.begin(115200);
+  rgbOff();
   GPSSerial.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
   delay(200);
   bringUpPanel();
   lcdFill(A_BLACK);
-  lcdTextC(180, "M U T I L L I X", 3, A_BRIGHT, A_BLACK);
+  lcdTextC(180, "MUTILLIX", 3, A_BRIGHT, A_BLACK);
   lcdTextC(230, "rain v0.02", 2, A_DIM, A_BLACK);
   lcdTextC(252, "TAP BOOT = VIEWS", 2, A_DIM, A_BLACK);
   lcdTextC(272, "HOLD BOOT = BAND", 2, A_DIM, A_BLACK);
-delay(2000);
+
   scpFb = (uint8_t *)heap_caps_malloc(SCP_S * SCP_S * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!scpFb) scpFb = (uint8_t *)malloc(SCP_S * SCP_S * 2);
   if (!scpFb) {
