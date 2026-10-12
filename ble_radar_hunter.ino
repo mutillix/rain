@@ -744,13 +744,16 @@ static bool isEspressifOui(uint32_t oui) {
   return false;
 }
 
+static uint32_t dbgMgmt = 0, dbgAction = 0, dbgMatch = 0;
 void hunterRx(void *buf, wifi_promiscuous_pkt_type_t type) {
   if (type != WIFI_PKT_MGMT) return;
+  dbgMgmt++;
   wifi_promiscuous_pkt_t *p = (wifi_promiscuous_pkt_t *)buf;
   if (p->rx_ctrl.sig_len < 30) return;
   uint8_t *pl = p->payload;
   if ((pl[0] & 0x0C) != 0x00) return;
   uint8_t subtype = pl[0] & 0xF0;
+  if (subtype == 0xD0) dbgAction++;
   if (subtype == 0xD0) {
     if (p->rx_ctrl.sig_len < 32) return;
     if (pl[24] != 127) return;
@@ -761,6 +764,7 @@ void hunterRx(void *buf, wifi_promiscuous_pkt_type_t type) {
   } else {
     return;
   }
+  dbgMatch++;
   int w = huntW.load(std::memory_order_relaxed);
   int r = huntR.load(std::memory_order_acquire);
   int nx = (w + 1) % HUNTRING;
@@ -857,10 +861,16 @@ void hunterStart() {
   WiFi.disconnect(true);
   delay(40);
   wifi_promiscuous_filter_t filt = {};
-  filt.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
-  esp_wifi_set_promiscuous_filter(&filt);
-  esp_wifi_set_promiscuous(true);
-  esp_wifi_set_promiscuous_rx_cb(&hunterRx);
+  filt.filter_mask = WIFI_PROMIS_FILTER_MASK_ALL;
+  // Ensure WiFi driver is init'd and started (band switching can leave it dead)
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  esp_wifi_init(&cfg);
+  esp_wifi_set_mode(WIFI_MODE_STA);
+  esp_wifi_start();
+  esp_err_t e1 = esp_wifi_set_promiscuous_filter(&filt);
+  esp_err_t e2 = esp_wifi_set_promiscuous(true);
+  esp_err_t e3 = esp_wifi_set_promiscuous_rx_cb(&hunterRx);
+  Serial.printf("promisc: filt=%d en=%d cb=%d\n", e1, e2, e3);
   hunterCh = 1;
   esp_wifi_set_channel(hunterCh, WIFI_SECOND_CHAN_NONE);
   lastHop = millis();
@@ -2235,6 +2245,12 @@ void loop() {
 
   if (bandMode == BAND_ESP) {
     hunterPoll();
+    static uint32_t lastDbg = 0;
+    if (now - lastDbg > 5000) {
+      lastDbg = now;
+      Serial.printf("hunterRx: mgmt=%u action=%u match=%u ch=%d\n",
+                    dbgMgmt, dbgAction, dbgMatch, hunterCh);
+    }
     if (now - lastHop > 250) {
       lastHop = now;
       hunterCh = hunterCh % 13 + 1;
